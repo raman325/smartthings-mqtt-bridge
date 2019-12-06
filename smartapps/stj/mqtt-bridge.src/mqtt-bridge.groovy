@@ -4,6 +4,7 @@
  *  Authors
  *   - st.john.johnson@gmail.com
  *   - jeremiah.wuenschel@gmail.com
+ *   - raman325 (made small edits)
  *
  *  Copyright 2016
  *
@@ -440,10 +441,23 @@ import groovy.transform.Field
     ]
 ]
 
+@Field LOCATION_BASE_ATTRS = [
+    "temperatureScale",
+    "name",
+    "id"
+]
+
+@Field LOCATION_POSITION_ATTRS = [
+    "latitude",
+    "longitude",
+    "zipCode",
+    "timeZone"
+]
+
 definition(
     name: "MQTT Bridge",
-    namespace: "stj",
-    author: "St. John Johnson and Jeremiah Wuenschel",
+    namespace: "raman325",
+    author: "St. John Johnson, Jeremiah Wuenschel, and Raman Gupta",
     description: "A bridge between SmartThings and MQTT",
     category: "My Apps",
     iconUrl: "https://s3.amazonaws.com/smartapp-icons/Connections/Cat-Connections.png",
@@ -452,18 +466,36 @@ definition(
 )
 
 preferences {
-    section("Send Notifications?") {
-        input("recipients", "contact", title: "Send notifications to", multiple: true, required: false)
-    }
+    page (name:"hubLevelInputs")
+}
 
-    section ("Input") {
-        CAPABILITY_MAP.each { key, capability ->
-            input key, capability["capability"], title: capability["name"], multiple: true, required: false
+def hubLevelInputs() {
+    dynamicPage(name: "hubLevelInputs", title: "Select Options", install: true, uninstall: true) {
+        section("Send Notifications?") {
+            input("recipients", "contact", title: "Send notifications to", multiple: true, required: false)
         }
-    }
 
-    section ("Bridge") {
-        input "bridge", "capability.notification", title: "Notify this Bridge", required: true, multiple: false
+        section ("Location Level Inputs") {
+            input("trackLocationMode", "bool", title: "Mode", multiple: false, required: false)
+            input("locationPosition", "bool", title: "Position Attributes", multiple: false, required: false)
+            input("locationSun", "bool", title: "Sunrise and Sunset Times", multiple: false, required: false)
+
+            def actions = location.helloHome?.getPhrases()*.label
+            if (actions) {
+                actions.sort()
+                input("routines", "enum", title: "Routines", multiple: true, required: false, options: actions)
+            }
+        }
+
+        section ("Device Level Inputs") {
+            CAPABILITY_MAP.each { key, capability ->
+                input key, capability["capability"], title: capability["name"], multiple: true, required: false
+            }
+        }
+
+        section ("Bridge") {
+            input "bridge", "capability.notification", title: "Notify this Bridge", required: true, multiple: false
+        }
     }
 }
 
@@ -496,8 +528,29 @@ def initialize() {
     // Subscribe to new events from devices
     CAPABILITY_MAP.each { key, capability ->
         capability["attributes"].each { attribute ->
-            subscribe(settings[key], attribute, inputHandler)
+            subscribe(settings[key], attribute, deviceHandler)
         }
+    }
+
+    // Subscribe to mode change events from Location
+    if (trackLocationMode) {
+        subscribe(location, "mode", locationHandler)
+    }
+
+    // Subscribe to sunrise/sunset change events from Location
+    if (locationSun) {
+        subscribe(location, "sunsetTime", sunsetHandler)
+        subscribe(location, "sunriseTime", sunriseHandler)
+    }
+
+    // Subscribe to position change events from location
+    if (locationPosition) {
+        subscribe(location, "position", positionHandler)
+    }
+
+    // Subscribe to routine execution events from Location
+    if (routines && routines.size() > 0) {
+        subscribe(location, "routineExecuted", routineHandler)
     }
 
     // Subscribe to events from the bridge
@@ -512,6 +565,38 @@ def updateSubscription() {
     def attributes = [
         notify: ["Contacts", "System"]
     ]
+
+    if (trackLocationMode || locationPosition || locationSun) {
+        updateLocationAttributes(LOCATION_BASE_ATTRS)
+
+        if (trackLocationMode) {
+            attributes["mode"] = ["Hub"]
+            locationHandler([
+                name: "mode",
+                value: location.mode
+            ])
+        }
+
+        if (locationPosition) {
+            updateLocationAttributes(LOCATION_POSITION_ATTRS)
+        }
+
+        if (locationSun) {
+            locationHandler([
+                name: "sunriseTime",
+                value: getSunriseAndSunset().sunrise
+            ])
+            locationHandler([
+                name: "sunsetTime",
+                value: getSunriseAndSunset().sunset
+            ])
+        }
+    }
+
+    if (routines) {
+        attributes["execute"] = ["Routine"]
+    }
+
     CAPABILITY_MAP.each { key, capability ->
         capability["attributes"].each { attribute ->
             if (!attributes.containsKey(attribute)) {
@@ -519,6 +604,12 @@ def updateSubscription() {
             }
             settings[key].each {device ->
                 attributes[attribute].push(device.displayName)
+
+                deviceHandler([
+                    "displayName": device.displayName, 
+                    "name": attribute, 
+                    "value": device.currentValue(attribute)
+                ])
             }
         }
     }
@@ -548,6 +639,53 @@ def bridgeHandler(evt) {
         return
     }
 
+    if (
+        json.name
+        && jason.name.length() == 3
+        && json.name.substring(0, 3) == "Hub"
+        && location.mode != json.value
+    ) {
+        if (json.type == "mode") {
+            if (location.modes?.find {it.name == json.value})
+            {
+                location.setMode(json.value)
+                state.ignoreEvent = json
+            }
+            else
+            {
+                log.warn "Ignoring invalid hub mode of '${json.value}'. Valid options are '${location.modes}'"
+                def resetAttribute = [
+                    "value": location.mode,
+                    "name": json.type
+                ]
+                locationHandler(resetAttribute)
+            }
+        }
+        else {
+            log.warn "Ignoring update to '${json.type}' since it can't be updated and resetting value"
+            def resetAttribute = [
+                "value": location."$json.type",
+                "name": json.type
+            ]
+            locationHandler(resetAttribute)
+        }
+        return
+    }
+
+    if (
+        json.type == "execute"
+        && json.name == "Routine"
+    ) {
+        def routineName = json.value
+        if (location.helloHome?.getPhrases()*.label?.find {it == routineName}) {
+            location.helloHome?.execute(routineName)
+        }
+        else {
+            log.warn "Routine ${routineName} doesn't exist so there is nothing to execute."
+        }
+    }
+
+
     // @NOTE this is stored AWFUL, we need a faster lookup table
     // @NOTE this also has no fast fail, I need to look into how to do that
     CAPABILITY_MAP.each { key, capability ->
@@ -565,7 +703,23 @@ def bridgeHandler(evt) {
                         if (capability.containsKey("action")) {
                             def action = capability["action"]
                             // Yes, this is calling the method dynamically
-                            "$action"(device, json.type, json.value)
+                            if ("$action"(device, json.type, json.value) == true) {
+                                return
+                            }
+                            else {
+                                if (device.hasAttribute(json.type)) {
+                                    log.warn "Value '${json.value}' not valid for device.attribute '${device.displayName}.${json.type}'."
+                                    def resetAttribute = [
+                                        "displayName": device.displayName,
+                                        "value": device.currentValue(json.type),
+                                        "name": json.type
+                                    ]
+                                    deviceHandler(resetAttribute)
+                                }
+                                else {
+                                    log.warn "Attribute '${json.type}' not available for device '${device.displayName}'"
+                                }
+                            }
                         }
                     }
                 }
@@ -575,23 +729,89 @@ def bridgeHandler(evt) {
 }
 
 // Receive an event from a device
-def inputHandler(evt) {
+def deviceHandler(evt) {
+    pushNotification(evt.displayName, evt.name, evt.value, true)
+}
+
+// Receive an event from a location
+def locationHandler(evt) {
+    pushNotification("Hub", evt.name, evt.value, true)
+}
+
+// Receive a physical location change event from a location
+def positionHandler(evt) {
+    updateLocationAttributes(LOCATION_BASE_ATTRS)
+    updateLocationAttributes(LOCATION_POSITION_ATTRS)
+}
+
+def sunriseHandler(evt) {
+    locationHandler([
+        name: "sunsetTime",
+        value: getSunriseAndSunset().sunset
+    ])
+}
+
+def sunsetHandler(evt) {
+    locationHandler([
+        name: "sunriseTime",
+        value: getSunriseAndSunset().sunrise
+    ])
+}
+
+// Update values of list of location attributes
+def updateLocationAttributes(attributes) {
+    attributes.each { attribute ->
+        if (attribute == "timeZone") {
+            locationHandler([
+                name: "timeZone",
+                value: location.timeZone.getID()
+            ])
+        }
+        else {
+            locationHandler([
+                name: attribute,
+                value: location."$attribute"
+            ])
+        }
+    }
+}
+
+// Receive a routine execution event from a device
+def routineHandler(evt) {
+    if (routines.any { it == evt.displayName }) {
+        pushNotification("Routine: ${evt.displayName}", "lastExecution", evt.date, false)
+        pushNotification("Routine", "lastRoutineExecuted", evt.displayName, false)
+    }
+}
+
+// Create event to send to device handler
+def pushNotification(name, type, value, checkIgnore) {
     if (
-        state.ignoreEvent
-        && state.ignoreEvent.name == evt.displayName
-        && state.ignoreEvent.type == evt.name
-        && state.ignoreEvent.value == evt.value
+        (
+            checkIgnore
+            && state.ignoreEvent
+            && state.ignoreEvent.name == name
+            && state.ignoreEvent.type == type
+            && state.ignoreEvent.value == value
+        )
+        || value == null
+        
     ) {
-        log.debug "Ignoring event ${state.ignoreEvent}"
+        def evt = [
+            name: name,
+            type: type,
+            value: value
+        ]
+        log.debug "Ignoring event ${evt}"
         state.ignoreEvent = false;
     }
     else {
         def json = new JsonOutput().toJson([
             path: "/push",
             body: [
-                name: evt.displayName,
-                value: evt.value,
-                type: evt.name
+                name: name,
+                value: (value as String),
+                type: type
             ]
         ])
 
@@ -621,6 +841,10 @@ def actionAlarm(device, attribute, value) {
         case "both":
             device.both()
         break
+        default:
+            return false
+        
+        return true
     }
 }
 
@@ -637,6 +861,10 @@ def actionColor(device, attribute, value) {
             def colormap = ["hue": values[0] as float, "saturation": values[1] as float]
             device.setColor(colormap)
         break
+        default:
+            return false
+        
+        return true
     }
 }
 
@@ -646,6 +874,11 @@ def actionOpenClosed(device, attribute, value) {
     } else if (value == "closed") {
         device.close()
     }
+    else {
+        return false
+    }
+    
+    return true
 }
 
 def actionOnOff(device, attribute, value) {
@@ -654,6 +887,11 @@ def actionOnOff(device, attribute, value) {
     } else if (value == "on") {
         device.on()
     }
+    else {
+        return false
+    }
+    
+    return true
 }
 
 def actionActiveInactive(device, attribute, value) {
@@ -662,22 +900,53 @@ def actionActiveInactive(device, attribute, value) {
     } else if (value == "inactive") {
         device.inactive()
     }
+    else {
+        return false
+    }
+    
+    return true
 }
 
 def actionThermostat(device, attribute, value) {
     switch(attribute) {
         case "heatingSetpoint":
-            device.setHeatingSetpoint(value)
+            device.setHeatingSetpoint(value as float)
         break
         case "coolingSetpoint":
-            device.setCoolingSetpoint(value)
+            device.setCoolingSetpoint(value as float)
         break
         case "thermostatMode":
-            device.setThermostatMode(value)
+            if (device.currentValue("supportedThermostatModes")?.find {it == value}) {
+                device.setThermostatMode(value)
+            }
+            else {
+                log.warn "Thermostat mode of '${value}' not a valid option for device '${device.displayName}'. Valid options are '${device.currentValue("supportedThermostatModes")}'"
+                def resetAttribute = [
+                    "displayName": device.displayName,
+                    "value": device.currentValue(attribute),
+                    "name": attribute
+                ]
+                deviceHandler(resetAttribute)
+            }
         break
         case "thermostatFanMode":
-            device.setThermostatFanMode(value)
+            if (device.currentValue("supportedThermostatFanModes")?.find {it == value}) {
+                device.setThermostatFanMode(value)
+            }
+            else {
+                log.warn "Thermostat fan mode of '${value}' not a valid option for device '${device.displayName}'. Valid options are '${device.currentValue("supportedThermostatFanModes")}'"
+                def resetAttribute = [
+                    "displayName": device.displayName,
+                    "value": device.currentValue(attribute),
+                    "name": attribute
+                ]
+                deviceHandler(resetAttribute)
+            }
         break
+        default:
+            return false
+        
+        return true
     }
 }
 
@@ -698,24 +967,35 @@ def actionMusicPlayer(device, attribute, value) {
                 device.setStatus(value)
             }
         break
+        default:
+            return false
+        
+        return true
     }
 }
 
 def actionColorTemperature(device, attribute, value) {
     device.setColorTemperature(value as int)
+    return true
 }
 
 def actionLevel(device, attribute, value) {
     device.setLevel(value as int)
+    return true
 }
 
 def actionPresence(device, attribute, value) {
     if (value == "present") {
-    	device.arrived();
+        device.arrived();
     }
     else if (value == "not present") {
-    	device.departed();
+        device.departed();
     }
+    else {
+        return false
+    }
+    
+    return true
 }
 
 def actionConsumable(device, attribute, value) {
@@ -728,26 +1008,71 @@ def actionLock(device, attribute, value) {
     } else if (value == "unlocked") {
         device.unlock()
     }
+    else {
+        return false
+    }
+    
+    return true
 }
 
 def actionCoolingThermostat(device, attribute, value) {
-    device.setCoolingSetpoint(value)
+    device.setCoolingSetpoint(value as float)
+    return true
 }
 
 def actionThermostatFan(device, attribute, value) {
-    device.setThermostatFanMode(value)
+    if (attribute != "thermostatFanMode") {
+        return false
+    }
+    else {
+        if (device.currentValue("supportedThermostatFanModes")?.find {it == value}) {
+            device.setThermostatFanMode(value)
+        }
+        else {
+            log.warn "Thermostat fan mode of '${value}' not a valid option for device '${device.displayName}'. Valid options are '${device.currentValue("supportedThermostatFanModes")}'"
+            def resetAttribute = [
+                "displayName": device.displayName,
+                "value": device.currentValue(attribute),
+                "name": attribute
+            ]
+            deviceHandler(resetAttribute)
+        }
+        return true
+    }
 }
 
 def actionHeatingThermostat(device, attribute, value) {
-    device.setHeatingSetpoint(value)
+    device.setHeatingSetpoint(value as float)
+    return true
 }
 
 def actionThermostatMode(device, attribute, value) {
-    device.setThermostatMode(value)
+    if (attribute != "thermostatMode") {
+        return false
+    }
+    else {
+        if (device.currentValue("supportedThermostatModes")?.find {it == value}) {
+            device.setThermostatMode(value)
+        }
+        else {
+            log.warn "Thermostat fan mode of '${value}' not a valid option for device '${device.displayName}'. Valid options are '${device.currentValue("supportedThermostatModes")}'"
+            def resetAttribute = [
+                "displayName": device.displayName,
+                "value": device.currentValue(attribute),
+                "name": attribute
+            ]
+            deviceHandler(resetAttribute)
+        }
+        return true
+    }
 }
 
 def actionTimedSession(device, attribute, value) {
     if (attribute == "timeRemaining") {
         device.setTimeRemaining(value)
+        return true
+    }
+    else {
+        return false
     }
 }
