@@ -39,6 +39,51 @@ $ mqtt pub -t 'smartthings/Fireplace Lights/switch'  -m 'off'
 # Light goes off in SmartThings
 ```
 
+## Location Events
+Monitoring and updating location properties follows a slightly different pattern from all other devices and attributes. If Location Mode, Position, or Sunrise/Sunset times are enabled, the location name, ID, and temperature unit will also be tracked under `{PREFACE}/Hub/<ATTRIBUTE_NAME>`. These attributes cannot be updated manually.
+
+### Monitoring Hub Mode
+The name of the current hub mode are sent to MQTT using the following format:
+```
+{PREFACE}/Hub/mode
+```
+
+For example, by default, the following topic can be used to track the mode of the hub:
+```
+smartthings/_Hub.Home/mode
+```
+
+### Monitoring Location Position and Sunrise/Sunset times
+If either of these are enabled, additional location attributes will be tracked under `{PREFACE}/Hub/<ATTRIBUTE_NAME>`. These attributes cannot be updated manually.
+
+### Monitoring Routine Executions
+The timestamp for the last execution of a given routine is sent to MQTT using the following format:
+```
+{PREFACE}/Routine: {ROUTINE_NAME}/lastExecution
+```
+
+For example, for the `Good Night!` routine, the following topic can be used to track when the routine was last run:
+```
+smartthings/Routine: Good Night!/lastExecution
+```
+
+The name of the routine that was most recently executed is also stored on the following MQTT topic:
+```
+{PREFACE}/Routine/lastRoutineExecuted
+```
+
+### Running a Routine
+The following topic is monitored to execute a routine, with the routine name expected as the message value:
+```
+{PREFACE}/Routine/execute
+```
+
+To run the `Good Night!` routine, publish a message of `Good Night!` to the following topic:
+
+```
+smartthings/Routine/execute
+```
+
 # Configuration
 
 The bridge has one yaml file for configuration:
