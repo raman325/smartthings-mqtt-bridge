@@ -640,9 +640,7 @@ def bridgeHandler(evt) {
     }
 
     if (
-        json.name
-        && jason.name.length() == 3
-        && json.name.substring(0, 3) == "Hub"
+        json.name == "Hub"
         && location.mode != json.value
     ) {
         if (json.type == "mode") {
